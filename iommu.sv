@@ -10,8 +10,6 @@ module iommu (
     output reg translation_done,
     output reg fault,
     // TLB interface
-    output reg tlb_query_valid,
-    output reg [31:0] tlb_query_vaddr,
     input wire [31:0] tlb_paddr,
     input wire tlb_hit,
     output reg tlb_update_valid,
@@ -56,7 +54,6 @@ module iommu (
             paddr_reg <= 0;
             fault_reg <= 0;
             translation_done_reg <= 0;
-            tlb_query_valid <= 0;
             tlb_update_valid <= 0;
             l2_request <= 0;
             l2_write_en <= 0;
@@ -66,15 +63,12 @@ module iommu (
                 IDLE: begin
                     if (translate_request) begin
                         daddr_reg <= daddr;
-                        tlb_query_vaddr <= daddr;
-                        tlb_query_valid <= 1;
                         state <= TLB_CHECK;
                     end
                     translation_done_reg <= 0;
                     fault_reg <= 0;
                 end
                 TLB_CHECK: begin
-                    tlb_query_valid <= 0;
                     if (tlb_hit) begin
                         paddr_reg <= tlb_paddr;
                         l2_addr <= {tlb_paddr[31:5], 5'b0}; // 32-byte aligned

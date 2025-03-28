@@ -28,27 +28,26 @@ module memory_system (
     output wire dma_error
 );
     // MMU/TLB wires
-    wire [31:0] mmu_paddr, icache_tlb_paddr, dcache_tlb_paddr;
-    wire mmu_done, mmu_fault, icache_tlb_hit, dcache_tlb_hit;
+    wire [31:0] tlb_paddr, mmu_paddr;
+    wire tlb_hit;
+    wire mmu_done, mmu_fault;
     wire mmu_tlb_update_valid, iommu_tlb_update_valid;
     wire [31:0] mmu_tlb_update_vaddr, mmu_tlb_update_paddr;
     wire [31:0] iommu_tlb_update_vaddr, iommu_tlb_update_paddr;
-    wire [31:0] icache_tlb_query_vaddr, dcache_tlb_query_vaddr;
-    wire icache_tlb_query_valid, dcache_tlb_query_valid;
 
     // L1 ICache wires
-    wire [31:0] icache_mmu_addr, icache_l2_addr;
+    wire [31:0] icache_l2_addr;
     wire icache_mmu_request, icache_l2_request;
     wire [255:0] icache_l2_data;
 
     // L1 DCache wires
-    wire [31:0] dcache_mmu_addr, dcache_l2_addr;
+    wire [31:0] dcache_l2_addr;
     wire dcache_mmu_request, dcache_l2_request;
     wire [255:0] dcache_l2_data, dcache_l2_write_data;
     wire dcache_l2_write_en;
 
     // IOMMU wires
-    wire [31:0] iommu_paddr, iommu_l2_addr;
+    wire [31:0] iommu_l2_addr;
     wire iommu_tlb_query_valid, iommu_l2_request, iommu_l2_write_en;
     wire [31:0] iommu_tlb_query_vaddr;
     wire [255:0] iommu_l2_write_data, iommu_l2_data;
@@ -79,21 +78,17 @@ module memory_system (
 
     // TLB (separate outputs for ICache and DCache)
     tlb tlb_inst (
-        .clk(clk),
-        .reset(reset),
-        .query_vaddr(i_addr | d_addr | iommu_tlb_query_vaddr),
-        .query_valid(icache_tlb_query_valid | dcache_tlb_query_valid | iommu_tlb_query_valid),
-        .paddr(icache_tlb_query_valid ? icache_tlb_paddr : (dcache_tlb_query_valid ? dcache_tlb_paddr : iommu_paddr)),
-        .hit(icache_tlb_query_valid ? icache_tlb_hit : (dcache_tlb_query_valid ? dcache_tlb_hit : tlb_hit)),
+        .clk(clk), .reset(reset),
+        .paddr(tlb_paddr), .hit(tlb_hit),
+        .vaddr(i_addr | d_addr | iommu_tlb_query_vaddr),
         .mmu_update_valid(mmu_tlb_update_valid | iommu_tlb_update_valid),
-        .mmu_vaddr(mmu_tlb_update_valid ? mmu_tlb_update_vaddr : iommu_tlb_update_vaddr),
         .mmu_paddr(mmu_tlb_update_valid ? mmu_tlb_update_paddr : iommu_tlb_update_paddr)
     );
 
     // MMU
     mmu mmu_inst (
         .clk(clk), .reset(reset),
-        .vaddr(icache_mmu_addr | dcache_mmu_addr | prefetch_mmu_addr),
+        .vaddr(i_addr | d_addr | prefetch_mmu_addr),
         .translate_request(icache_mmu_request | dcache_mmu_request | prefetch_mmu_request),
         .paddr(mmu_paddr), .translation_done(mmu_done), .fault(mmu_fault),
         .tlb_update_valid(mmu_tlb_update_valid), .tlb_update_vaddr(mmu_tlb_update_vaddr), .tlb_update_paddr(mmu_tlb_update_paddr)
@@ -102,12 +97,12 @@ module memory_system (
     // IOMMU
     iommu iommu_inst (
         .clk(clk), .reset(reset),
+        .tlb_paddr(tlb_paddr), .tlb_hit(tlb_hit),
         .daddr(device_request ? device_addr : dma_iommu_daddr),
         .translate_request(device_request | dma_iommu_translate_request),
         .write_en(device_request ? device_write_en : dma_iommu_write_en),
         .write_data(device_request ? device_write_data : dma_iommu_write_data),
         .paddr(iommu_paddr), .data_out(iommu_data_out), .translation_done(iommu_done), .fault(iommu_fault),
-        .tlb_query_valid(iommu_tlb_query_valid), .tlb_query_vaddr(iommu_tlb_query_vaddr), .tlb_paddr(iommu_paddr), .tlb_hit(tlb_hit),
         .tlb_update_valid(iommu_tlb_update_valid), .tlb_update_vaddr(iommu_tlb_update_vaddr), .tlb_update_paddr(iommu_tlb_update_paddr),
         .l2_addr(iommu_l2_addr), .l2_request(iommu_l2_request), .l2_write_data(iommu_l2_write_data), .l2_write_en(iommu_l2_write_en),
         .l2_data(iommu_l2_data), .l2_done(l2_done),
@@ -128,11 +123,10 @@ module memory_system (
     // L1 ICache
     l1_icache icache_inst (
         .clk(clk), .reset(reset),
-        .addr(i_addr), .read_en(i_read_en),
+        .tlb_paddr(tlb_paddr), .tlb_hit(tlb_hit),
+        .vaddr(i_addr), .read_en(i_read_en),
         .data_out(i_data), .hit(i_hit), .miss(i_miss),
-        .tlb_query_vaddr(icache_tlb_query_vaddr), .tlb_query_valid(icache_tlb_query_valid),
-        .tlb_paddr(icache_tlb_paddr), .tlb_hit(icache_tlb_hit),
-        .mmu_addr(icache_mmu_addr), .mmu_request(icache_mmu_request), .mmu_paddr(mmu_paddr), .mmu_done(mmu_done),
+        .mmu_request(icache_mmu_request), .mmu_paddr(mmu_paddr), .mmu_done(mmu_done),
         .l2_addr(icache_l2_addr), .l2_request(icache_l2_request), .l2_data(icache_l2_data), .l2_done(l2_done),
         .prefetch_addr(icache_prefetch_addr), .prefetch_data(icache_prefetch_data), .prefetch_valid(icache_prefetch_valid)
     );
@@ -140,11 +134,10 @@ module memory_system (
     // L1 DCache
     l1_dcache dcache_inst (
         .clk(clk), .reset(reset),
-        .addr(d_addr), .read_en(d_read_en), .write_en(d_write_en), .write_data(d_write_data),
+        .tlb_paddr(tlb_paddr), .tlb_hit(tlb_hit),
+        .vaddr(d_addr), .read_en(d_read_en), .write_en(d_write_en), .write_data(d_write_data),
         .data_out(d_data), .hit(d_hit), .miss(d_miss),
-        .tlb_query_vaddr(dcache_tlb_query_vaddr), .tlb_query_valid(dcache_tlb_query_valid),
-        .tlb_paddr(dcache_tlb_paddr), .tlb_hit(dcache_tlb_hit),
-        .mmu_addr(dcache_mmu_addr), .mmu_request(dcache_mmu_request), .mmu_paddr(mmu_paddr), .mmu_done(mmu_done),
+        .mmu_request(dcache_mmu_request), .mmu_paddr(mmu_paddr), .mmu_done(mmu_done),
         .l2_addr(dcache_l2_addr), .l2_request(dcache_l2_request), .l2_write_data(dcache_l2_write_data), .l2_write_en(dcache_l2_write_en),
         .l2_data(dcache_l2_data), .l2_done(l2_done),
         .prefetch_addr(dcache_prefetch_addr), .prefetch_data(dcache_prefetch_data), .prefetch_valid(dcache_prefetch_valid)
@@ -164,7 +157,7 @@ module memory_system (
     // L2 Cache
     l2_cache l2_inst (
         .clk(clk), .reset(reset),
-        .addr(icache_l2_addr | dcache_l2_addr | iommu_l2_addr | prefetch_l2_addr),
+        .paddr(icache_l2_addr | dcache_l2_addr | iommu_l2_addr | prefetch_l2_addr),
         .request(icache_l2_request | dcache_l2_request | iommu_l2_request | prefetch_l2_request),
         .write_en(dcache_l2_write_en | iommu_l2_write_en),
         .write_data({256'b0, dcache_l2_write_en ? dcache_l2_write_data : iommu_l2_write_data}),

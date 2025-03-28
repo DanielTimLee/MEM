@@ -1,18 +1,13 @@
 module l1_icache (
-    input wire clk,
-    input wire reset,
-    input wire [31:0] addr,         // Virtual address
+    input wire clk, reset,
     input wire read_en,
+    input wire [31:0] vaddr,
     output reg [31:0] data_out,
-    output reg hit,
-    output reg miss,
+    output reg hit, miss,
     // TLB interface
-    output reg [31:0] tlb_query_vaddr,
-    output reg tlb_query_valid,
     input wire [31:0] tlb_paddr,
     input wire tlb_hit,
     // MMU interface
-    output reg [31:0] mmu_addr,
     output reg mmu_request,
     input wire [31:0] mmu_paddr,
     input wire mmu_done,
@@ -26,53 +21,53 @@ module l1_icache (
     input wire [255:0] prefetch_data,
     input wire prefetch_valid
 );
-//    localparam NUM_LINES = 512;     // 16KB / 32B = 512 lines
-    localparam NUM_LINES = 8;     // was 512 lines
+//    localparam SETS = 512;            // 16KB / 32B = 512 sets
+    localparam SETS = 8;                // 8 sets
+    localparam ASSOCIATIVITY = 1;       // 1-way associative
+    localparam LINES = SETS * ASSOCIATIVITY;
+    
     localparam BLOCK_SIZE = 32;     // 32-byte blocks
-    localparam TAG_WIDTH = 20;      // Physical tags
-    localparam ENTRY_WIDTH = TAG_WIDTH + BLOCK_SIZE*8 + 1;  // 20 + 256 + 1 = 277 bits
+    localparam TAG_WIDTH = 20;      // Physical tags (32 - 12bit = 20) 4KB page so 12bit for offset.
+    localparam VALID_BIT = 1;
+    
+    localparam WIDTH = TAG_WIDTH + BLOCK_SIZE*8 + VALID_BIT;  // 20 + 256 + 1 = 277 bits
 
     // RAM array for cache
-    reg [ENTRY_WIDTH-1:0] cache [0:NUM_LINES-1];
+    reg [WIDTH-1:0] cache [0:LINES-1];
 
-    wire [8:0] index = addr[13:5];  // Virtual index
-    wire [4:0] offset = addr[4:0];
-    wire [19:0] phys_tag = tlb_paddr[31:12];
-    wire [8:0] prefetch_index = prefetch_addr[13:5];
+    // L1 uses VIPT(Virtual Index + Physical Tag) matching
+    // 1. Lookup for SET with Virtual Index
+    // 2. Match right ENTRY for Physical Tag
+    // 3. Fetch value from cache by offset
+    wire [8:0]  VIDX           = vaddr[13:5];       // Virtual index (9bit for 2^9 = 512 sets)
+    wire [19:0] PTAG           = tlb_paddr[31:12];  // Physical Tag (32 - 12bit[4KB page offset] = 20)
+    wire [4:0]  offset         = vaddr[4:0];        // BLOCK_SIZE*8 (4 Byte block * 8 = 256 byte)
+                                                    //   = each byte should be accessible
+                                                    //   = 256 / 8 bit(1Byte) = 32 (2^5), so here uses 5 bit offset. 
+    wire [8:0]  prefetch_VIDX = prefetch_addr[13:5];
+    
+    // 1. VIDX lookup SET
+    reg [19:0]  set_tag     = cache[VIDX][WIDTH-1:WIDTH-TAG_WIDTH];
+    reg [255:0] set_data    = cache[VIDX][BLOCK_SIZE*8:1];
+    reg         set_valid   = cache[VIDX][0];
 
-    // Cached values for combinational lookup
-    reg [19:0] cached_tag;
-    reg [255:0] cached_data;
-    reg cached_valid;
+    `define FOR_EACH_RANGE(i, start, N)   for (int i = start; i < N; i = i + 1)
 
     // State machine
     typedef enum { IDLE, LOOKUP, TLB_MISS, FETCH_L2 } state_t;
     state_t state;
 
-    reg [31:0] addr_reg;
-
-    // Combinational read for BRAM inference
-    always @(posedge clk) begin
-        if (reset) begin
-            cached_tag <= 0;
-            cached_data <= 0;
-            cached_valid <= 0;
-        end else begin
-            cached_tag <= cache[index][ENTRY_WIDTH-1:ENTRY_WIDTH-TAG_WIDTH];
-            cached_data <= cache[index][BLOCK_SIZE*8:1];
-            cached_valid <= cache[index][0];
-        end
-    end
-
     // Write logic (single write per cycle)
     always @(posedge clk) begin
-        if (reset) begin
-            for (integer i = 0; i < NUM_LINES; i = i + 1) cache[i] <= 0;
-        end else if (prefetch_valid) begin
-            cache[prefetch_index] <= {prefetch_addr[31:12], prefetch_data, 1'b1};
-        end else if (state == FETCH_L2 && l2_done) begin
-            cache[index] <= {mmu_paddr[31:12], l2_data, 1'b1};
-        end
+        if (reset)
+            `FOR_EACH_RANGE(i, 0, LINES)
+                cache[i] <= 0;
+                
+        else if (prefetch_valid)
+            cache[prefetch_VIDX] <= {prefetch_addr[31:12], prefetch_data, 1'b1};
+        
+        else if (state == FETCH_L2 && l2_done)
+            cache[VIDX] <= {mmu_paddr[31:12], l2_data, 1'b1};
     end
 
     // Control logic
@@ -81,52 +76,42 @@ module l1_icache (
             state <= IDLE;
             hit <= 0;
             miss <= 0;
-            tlb_query_valid <= 0;
             mmu_request <= 0;
             l2_request <= 0;
             data_out <= 0;
         end else begin
             case (state)
-                IDLE: begin
-                    if (read_en) begin
-                        addr_reg <= addr;
-                        tlb_query_vaddr <= addr;
-                        tlb_query_valid <= 1;
+                IDLE:
+                    if (read_en)
                         state <= LOOKUP;
-                    end
-                end
-                LOOKUP: begin
-                    tlb_query_valid <= 0;
-                    if (cached_valid && cached_tag == phys_tag && tlb_hit) begin
-                        hit <= 1;
-                        miss <= 0;
-                        data_out <= cached_data[offset*8 +: 32];
+                        
+                LOOKUP:
+                    if (set_valid && tlb_hit && set_tag == PTAG) begin
+                        data_out <= set_data[offset*8 +: 32];
+                        hit <= 1; miss <= 0;
                         state <= IDLE;
                     end else begin
-                        hit <= 0;
-                        miss <= 1;
-                        mmu_addr <= addr_reg;
+                        hit <= 0; miss <= 1;
                         mmu_request <= 1;
                         state <= TLB_MISS;
                     end
-                end
-                TLB_MISS: begin
+
+                TLB_MISS:
                     if (mmu_done) begin
-                        mmu_request <= 0;
                         l2_addr <= {mmu_paddr[31:5], 5'b0};
                         l2_request <= 1;
+                        mmu_request <= 0;
                         state <= FETCH_L2;
                     end
-                end
-                FETCH_L2: begin
+
+                FETCH_L2:
                     if (l2_done) begin
-                        l2_request <= 0;
                         data_out <= l2_data[offset*8 +: 32];
-                        hit <= 1;
-                        miss <= 0;
+                        hit <= 1; miss <= 0;
+                        l2_request <= 0;
                         state <= IDLE;
                     end
-                end
+                
                 default: state <= IDLE;
             endcase
         end
